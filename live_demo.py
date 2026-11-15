@@ -1,22 +1,42 @@
+import os
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+import time
+import threading
 import cv2
 from deepface import DeepFace
 
-cap = cv2.VideoCapture(0)  # 0 = default webcam
+# Limit TensorFlow CPU use so the PC stays usable
+try:
+    import tensorflow as tf
+    tf.config.threading.set_intra_op_parallelism_threads(2)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+except Exception:
+    pass
 
-frame_count = 0
+ANALYZE_WIDTH = 320      # analyze a small copy of the frame
+PAUSE_SECONDS = 1.0      # rest between analyses (raise to 2.0 for slower PCs)
+
+latest_frame = None
 results = []
-SCALE = 0.5  # analyze a smaller frame for speed
+scale = 1.0
+running = True
+lock = threading.Lock()
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
 
-    # Analyze every 15th frame to keep video smooth
-    if frame_count % 15 == 0:
-        small = cv2.resize(frame, (0, 0), fx=SCALE, fy=SCALE)
+def worker():
+    global results, scale
+    while running:
+        with lock:
+            frame = None if latest_frame is None else latest_frame.copy()
+        if frame is None:
+            time.sleep(0.05)
+            continue
+
+        h, w = frame.shape[:2]
+        small = cv2.resize(frame, (ANALYZE_WIDTH, int(h * ANALYZE_WIDTH / w)))
         try:
-            results = DeepFace.analyze(
+            res = DeepFace.analyze(
                 small,
                 actions=["age", "gender", "emotion"],
                 detector_backend="opencv",
@@ -24,25 +44,45 @@ while True:
             )
         except Exception as e:
             print("Analysis error:", e)
+            res = []
 
-    # Draw results (scale coordinates back up to the full frame)
-    for face in results:
+        with lock:
+            results = res
+            scale = w / ANALYZE_WIDTH
+        time.sleep(PAUSE_SECONDS)
+
+
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+threading.Thread(target=worker, daemon=True).start()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    with lock:
+        latest_frame = frame
+        current, s = results, scale
+
+    for face in current:
+        if face.get("face_confidence", 1) == 0:
+            continue  # no real face found
         r = face["region"]
-        x = int(r["x"] / SCALE)
-        y = int(r["y"] / SCALE)
-        w = int(r["w"] / SCALE)
-        h = int(r["h"] / SCALE)
+        x, y = int(r["x"] * s), int(r["y"] * s)
+        w, h = int(r["w"] * s), int(r["h"] * s)
         label = f'{face["dominant_gender"]}, {face["age"]}, {face["dominant_emotion"]}'
-
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.putText(frame, label, (x, max(y - 10, 20)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
     cv2.imshow("DeepFace Live", frame)
-    frame_count += 1
-
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
+running = False
 cap.release()
 cv2.destroyAllWindows()

@@ -28,3 +28,4 @@ docker/weaviate_data
 deepface/api/proto/*_pb2.py
 deepface/api/proto/*_pb2.pyi
 deepface/api/proto/*_pb2_grpc.py
+groq_key.txt
